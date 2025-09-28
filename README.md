@@ -1,5 +1,5 @@
-# ESGS
-This is the official repository for our paper "Enhancing Sparse-View 3D Gaussian Splatting via Multi-Level Collaborative Optimization for Robust Novel View Synthesis"
+# GL-GS
+This is the official repository for our paper "Global-Local Collaborative Density and Geometry Regulation in Sparse-View 3D Gaussian Splatting"
 
 <img width="1600" height="900" alt="1" src="https://github.com/user-attachments/assets/35557de9-1fe9-438f-85b2-ba4bd5143397" />
 
