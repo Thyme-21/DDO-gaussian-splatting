@@ -216,11 +216,19 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, path, rgb_m
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
         rgb_path = rgb_mapping[idx]   # os.path.join(images_folder, rgb_mapping[idx])
+
+        try:
+            mask_name = '{0:03d}'.format(idx) + '.png'
+            mask_name = os.path.join(masks_folder, mask_name)
+            mask = Image.open(mask_name)
+        except:
+            mask = None
+
         rgb_name = os.path.basename(rgb_path).split(".")[0]
         image = Image.open(rgb_path)
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, image_path=image_path,
-                image_name=image_name, width=width, height=height, mask=None, bounds=bounds, focalx=focal_length_x, focaly=focal_length_y)
+                image_name=image_name, width=width, height=height,  mask=mask, bounds=bounds, focalx=focal_length_x, focaly=focal_length_y)
         cam_infos.append(cam_info)
 
     sys.stdout.write('\n')
@@ -312,6 +320,8 @@ def readColmapSceneInfo(path, images, eval, n_views=0, llffhold=8, rand_pcd=Fals
         storePly(ply_path, xyz, SH2RGB(shs) * 255)
     else:
         ply_path = os.path.join(path, str(n_views) + "_views/dense/fused.ply")
+        # bin_path = os.path.join(path, "sparse/0/points3D.bin")
+        # txt_path = os.path.join(path, "sparse/0/points3D.txt")
 
     try:
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
