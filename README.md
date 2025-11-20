@@ -61,6 +61,13 @@ pip install gaussian-splatting/submodules/simple-knn
    python tools/colmap_360.py
    ```
 
+3. Start training and testing:
+   
+   ```bash
+   # for example
+   bash scripts/run_360.sh ${gpu_id} data/mipnerf360/bicycle output/mipnerf360/bicycle
+   ```
+
 # Acknowledgement
 
 Special thanks to the following awesome projects!
