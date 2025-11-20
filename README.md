@@ -1,18 +1,19 @@
 # GL-GS
-This is the official repository for our paper "Global-Local Collaborative Density and Geometry Regulation in Sparse-View 3D Gaussian Splatting"
+This is the official repository for our paper "A Depth-Guided and Density-Adaptive Optimization Framework for Sparse-View 3D Gaussian Splatting"
 
-<img width="1600" height="900" alt="1" src="https://github.com/user-attachments/assets/35557de9-1fe9-438f-85b2-ba4bd5143397" />
+<img width="755" height="430" alt="image" src="https://github.com/user-attachments/assets/ea01da32-33c6-42bd-82b7-e365c4ac360b" />
+
 
 
 ## Abstract
-Novel view synthesis aims to reconstruct three-dimensional scenes from a limited number of viewpoints and generate photorealistic images of unseen views. This task has broad applications in virtual reality, film production, and robotic navigation. However, under sparse-view conditions, traditional methods such as 3D Gaussian Splatting (3DGS) often face challenges, including geometric instability and insufficient point cloud distribution.To address these issues, this paper introduces a multi-level collaborative optimization framework. Firstly, a monocular depth estimator provides depth-based geometric supervision, mitigating geometric deviations under sparse conditions. Secondly, a local refinement module based on cross-view matching dynamically corrects point cloud distribution in high-error regions, enhancing texture and detail consistency. Finally, a global-local collaborative point cloud density regulation method is introduced, combining global opacity control with depth-gradient awareness to compress redundant point clouds while preserving clear geometric boundaries.Experimental results on the LLFF and Mip-NeRF360 datasets demonstrate that our method achieves strong performance in geometric stability, detail fidelity, and overall rendering quality. Here, we show that our approach improves PSNR by up to 10%, SSIM by up to 8%, and reduces LPIPS by up to 15% compared to state-of-the-art methods, showcasing its potential for practical applications in sparse-view reconstruction.
+Sparse-view 3D Gaussian Splatting often suffers from unstable geometric structures and redundant point growth during training, partly due to insufficient geometric constraints and lack of precise regularization in the optimization process. To address these problems, this paper proposes a depth-driven, density-oriented optimization framework for 3D Gaussian Splatting (DDO-GS). First, we introduce a globally–locally stabilized depth-guided module, which employs single-view depth estimator predictions as supervisory signals and uses blurred depth maps to filter distant points. At the same time, we design a randomness-discard strategy guided by depth, allowing better preservation of near-field details while suppressing far-field redundancy. Second, to alleviate the loss of fine details in sparse-view input, we incorporate a depth-magnitude-driven selective dropout mechanism. Based on the magnitude of Gaussian density gradients, we regard the depth-direction gradient as an indicator of geometric confidence, and enhance regional refinement through gradient amplification, thereby improving the structural completeness of edge and high-frequency regions. Finally, to further stabilize point-density distribution during optimization, we propose a soft–hard combined opacity adjustment strategy, effectively suppressing redundant Gaussian growth and mitigating opacity overflow. Experiments on LLFF and Mip-NeRF360 datasets demonstrate that the proposed method yields stable geometric structures and delivers improvements in rendering quality, particularly in fine-detail reconstruction.
 
 ## Installation
 Tested on Ubuntu 20.04, CUDA 11.8, PyTorch 1.12.1
 
 ``````
 conda env create --file environment.yml
-conda activate ESGS
+conda activate DDO-GS
 ``````
 
 ``````
@@ -67,4 +68,4 @@ Special thanks to the following awesome projects!
 - [Gaussian-Splatting](https://github.com/graphdeco-inria/gaussian-splatting)
 - [FSGS](https://github.com/VITA-Group/FSGS)
 - [CoR-GS](https://github.com/jiaw-z/CoR-GS)
-- [GS-LPM](https://github.com/Surrey-UP-Lab/GS-LPM)
+- [DropGaussian_release](https://github.com/DCVL-3D/DropGaussian_release)
