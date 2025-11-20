@@ -99,20 +99,16 @@ class OptimizationParams(ParamGroup):
         self.dist_thres = 10.
         self.random_background = False
         self.zdensify = True
+        # self.zdensify = False
 
-        self.ranking_reg = 0.05
         self.opacity_reg = 0.01
         self.depth_weight = 0.05
-        self.depth_pseudo_weight = 0.5
-        self. scale_reg = 0.01
-        self.opacity_reg = 0.01
-        self.reset_from_iter = 500
-        self.reset_until_iter = 15_000
-        self.reset_interval = 100
-        self.angle = 45
-        # 对于室内场景，我们建议使用不太频繁的重置和更大的相邻角度，因此将 reset_interval 设置为 200，角度设置为 90。
-        # 对于室外场景，请使用默认设置。您可以修改这些设置以满足您的特定场景需求。
-        # self.angle = 90
+
+        self.drop_min = 0.05
+        self.drop_max = 0.3
+        self.lambda_far = 1.0
+        self.densify_topk_ratio = 0.8  # 每次 densify 只处理 Top-K
+        
 
         super().__init__(parser, "Optimization Parameters")
 
