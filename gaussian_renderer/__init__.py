@@ -18,7 +18,7 @@ from utils.sh_utils import eval_sh
 
 
 def render(viewpoint_camera, pc, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0,
-           override_color = None, white_bg = False):
+           override_color = None, white_bg = False,is_train = False,iteration=None, drop_min=0.05, drop_max=0.3):
     """
     Render the scene.
 
@@ -90,6 +90,39 @@ def render(viewpoint_camera, pc, pipe, bg_color : torch.Tensor, scaling_modifier
     else:
         colors_precomp = override_color
 
+    if is_train:
+        gaussian_positions = pc.get_xyz
+        # camera_depths = torch.norm(gaussian_positions - viewpoint_camera.camera_center, dim=1) + 1e-6
+        ones = torch.ones((gaussian_positions.shape[0], 1), device=gaussian_positions.device)
+        gaussian_positions_homo = torch.cat([gaussian_positions, ones], dim=1)  # [N, 4]
+        camera_coordinates = torch.matmul(gaussian_positions_homo, viewpoint_camera.world_view_transform.T)  # [N, 4]
+        camera_depths = camera_coordinates[:, 2]
+        depth_min, depth_max = camera_depths.min(), camera_depths.max()
+        depth_score = (1.0 - (camera_depths - depth_min) / (depth_max - depth_min + 1e-6)).float()
+
+        sorted_depths, _ = torch.sort(camera_depths)
+        n = sorted_depths.shape[0]
+        idx_33 = int(n * 0.33)
+        idx_67 = int(n * 0.67)
+        depth_percentile_33 = sorted_depths[idx_33].float()
+        depth_percentile_67 = sorted_depths[idx_67].float()
+
+        near_field = camera_depths <= depth_percentile_33
+        mid_field = (camera_depths > depth_percentile_33) & (camera_depths <= depth_percentile_67)
+        far_field = camera_depths > depth_percentile_67
+        
+        combined_score = depth_score.float()
+
+        progress = min(1.0, iteration / 10000.0)
+        drop_rate = float(drop_min + (drop_max - drop_min) * progress)
+
+        drop_prob = (near_field.float() * combined_score * drop_rate +
+                     mid_field.float() * combined_score * drop_rate * 0.7 +
+                     far_field.float() * combined_score * drop_rate * 0.3)
+
+        keep_prob = 1.0 - drop_prob
+        mask = (torch.rand_like(keep_prob) < keep_prob).float()
+        opacity = opacity * mask[:, None]
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     rendered_image, radii, depth, alpha = rasterizer(
