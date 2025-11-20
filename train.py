@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from torchmetrics import PearsonCorrCoef
 from torchmetrics.functional.regression import pearson_corrcoef
 from random import randint
-from utils.loss_utils import l1_loss, l1_loss_mask, l2_loss, ssim, loss_photometric, ranking_loss
+from utils.loss_utils import l1_loss, l1_loss_mask, l2_loss, ssim, loss_photometric
 from utils.depth_utils import estimate_depth, load_depth_model
 from gaussian_renderer import render, network_gui
 import sys
@@ -41,9 +41,12 @@ import random
 
 from utils.visualization_utils import depth2image, visualize_cmap
 
+mask_is_near = True
+from scene import dataset_readers
+
 import kmeans1d
 import open3d as o3d
-from lpm.lpm import LPM
+
 import copy
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -56,50 +59,6 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is
 depth_model = load_depth_model('vitl')
 
 
-# DEFAULT_SAVE_DEPTH_EVERY = 1000
-
-# # 归一化并保存深度图（百分位裁剪，避免极端值拉平对比度）
-# def save_depth_image(depth, filename, clip=(1, 99)):
-#     """
-#     depth: torch.Tensor [H,W] / [1,H,W] 或 np.ndarray [H,W]
-#     filename: e.g. outputs/depth_debug/SCENE/IMG_it000100.png
-#     """
-#     if isinstance(depth, torch.Tensor):
-#         d = depth.detach().float().cpu().squeeze().numpy()
-#     else:
-#         d = np.array(depth).squeeze()
-#
-#     lo, hi = np.percentile(d, clip)
-#     d = np.clip(d, lo, hi)
-#     d = (d - lo) / (hi - lo + 1e-8)
-#
-#     os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
-#     plt.imsave(filename, (d * 255).astype(np.uint8), cmap='gray')
-#
-#
-# # 从 args / viewpoint_cam 中推断场景名与图像名（避免 NameError）
-# def get_scene_tag(args, viewpoint_cam):
-#     # 尝试从 args 取
-#     for k in ['scene', 'scene_name', 'dataset', 'expname']:
-#         if hasattr(args, k) and getattr(args, k):
-#             return str(getattr(args, k))
-#     # 再尝试从相机对象取
-#     for k in ['scene_name', 'dataset_name']:
-#         if hasattr(viewpoint_cam, k) and getattr(viewpoint_cam, k):
-#             return str(getattr(viewpoint_cam, k))
-#     return 'unknown_scene'
-#
-# def get_image_tag(viewpoint_cam, idx=None):
-#     # 尽量用原始图名；退化到相机/索引
-#     for k in ['image_name', 'img_name', 'frame_name', 'name']:
-#         if hasattr(viewpoint_cam, k) and getattr(viewpoint_cam, k):
-#             base = os.path.basename(str(getattr(viewpoint_cam, k)))
-#             return os.path.splitext(base)[0]
-#     if hasattr(viewpoint_cam, 'camera_id'):
-#         return f'cam{int(viewpoint_cam.camera_id):04d}'
-#     return f'view{0 if idx is None else int(idx):04d}'
-
-
 def seed_everything(seed):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -109,6 +68,77 @@ def seed_everything(seed):
     # torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = False
+
+
+def load_preprocessed_masks(scene_name, preprocessed_mask_dir, resolution_factor, mask_param=None):
+    mask_cache = {}
+
+    if mask_param is not None:
+        mask_dir_name = f"preprocessed_masks_{mask_param}"
+    else:
+        mask_dir_name = "preprocessed_masks"
+
+    base_mask_dir = os.path.join(os.path.dirname(preprocessed_mask_dir), mask_dir_name)
+    res_dir = os.path.join(base_mask_dir, scene_name, f"r{resolution_factor}")
+    mask_files = [f for f in os.listdir(res_dir) if f.endswith('.pt')]
+    print(f"Loading {len(mask_files)} preprocessed masks from {res_dir}")
+
+    for mask_file in mask_files:
+        image_name = mask_file.replace('.pt', '')
+        mask_path = os.path.join(res_dir, mask_file)
+        mask_tensor = torch.load(mask_path, map_location='cuda')
+        mask_cache[image_name] = mask_tensor
+
+    return mask_cache
+
+
+def apply_mask_to_image(image, mask):
+    mask_expanded = mask.unsqueeze(0).expand_as(image)
+    masked_image = image * mask_expanded
+    return masked_image
+
+
+def masked_l1(render, gt, mask):
+    """
+    render, gt: [C,H,W] 或 [1,C,H,W]
+    mask: [H,W] / [1,H,W] / [1,1,H,W]，值域0/1
+    返回按mask归一化后的L1标量
+    """
+    if render.dim() == 3:
+        render = render.unsqueeze(0)
+    if gt.dim() == 3:
+        gt = gt.unsqueeze(0)
+    if mask.dim() == 2:
+        mask = mask.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+    elif mask.dim() == 3:  # [1,H,W]
+        mask = mask.unsqueeze(1)  # [1,1,H,W]
+
+    if mask.shape[1] == 1 and render.shape[1] == 3:
+        mask3 = mask.repeat(1, 3, 1, 1)
+    else:
+        mask3 = mask
+
+    diff = (render - gt).abs() * mask3
+    denom = mask3.sum().clamp_min(1.0)
+    return diff.sum() / denom
+
+
+def safe_pearson(x, y, eps=1e-8):
+    """
+    稳健版 Pearson 相关系数：
+    若方差过小（图像恒定/区域mask极小），直接返回0
+    """
+    x = x.float().reshape(-1)
+    y = y.float().reshape(-1)
+    xm = x.mean()
+    ym = y.mean()
+    xv = x - xm
+    yv = y - ym
+    vx = (xv * xv).mean()
+    vy = (yv * yv).mean()
+    if vx < eps or vy < eps:
+        return torch.tensor(0.0, device=x.device)
+    return (xv * yv).mean() / torch.sqrt(vx * vy + eps)
 
 
 def training(dataset, opt, pipe, args, depth_model):
@@ -142,6 +172,17 @@ def training(dataset, opt, pipe, args, depth_model):
 
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
+
+
+    scene_name = os.path.basename(dataset.source_path)
+    mask_cache = {}
+
+    if opt.lambda_far > 0:
+        preprocessed_mask_dir = "./preprocessed_masks"
+        resolution_factor = dataset.resolution
+        mask_param = getattr(args, 'mask_param', None) if 'args' in globals() else None
+        mask_cache = load_preprocessed_masks(scene_name, preprocessed_mask_dir, resolution_factor, mask_param)
+
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
 
     viewpoint_stack, pseudo_stack = None, None
@@ -152,10 +193,11 @@ def training(dataset, opt, pipe, args, depth_model):
     ema_loss_for_log = 0.0
     first_iter += 1
 
-    ############step1 initalize the Localized Gaussian Point Mangement(LPM)############
-    lpm = LPM(scene, gaussians, angle=opt.angle)
-
     for iteration in range(first_iter, opt.iterations + 1):
+
+        gaussians.update_learning_rate(iteration)
+
+
         if network_gui.conn == None:
             network_gui.try_connect()
         while network_gui.conn != None:
@@ -184,11 +226,13 @@ def training(dataset, opt, pipe, args, depth_model):
         # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
-        ############step2 random sample reffered view from the nerihbor cam############
-        current_view_index, sampled_index, image, gt_image = lpm.find_neighbor_cam(viewpoint_cam)
 
+        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
         gt_image = viewpoint_cam.original_image.cuda()
+
+        far_mask = None
+        if opt.lambda_far > 0 and viewpoint_cam.image_name in mask_cache:
+            far_mask = mask_cache[viewpoint_cam.image_name].to(gt_image.device).float()
 
         if 'DTU' in scene.source_path:
             if 'scan110' not in scene.source_path:
@@ -210,7 +254,10 @@ def training(dataset, opt, pipe, args, depth_model):
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
         for i in range(args.gaussiansN):
-            RenderDict[f"render_pkg_gs{i}"] = render(viewpoint_cam, GsDict[f'gs{i}'], pipe, bg)
+            RenderDict[f"render_pkg_gs{i}"] = render(viewpoint_cam, GsDict[f'gs{i}'], pipe, bg,
+                                                     is_train=True, iteration=iteration,
+                                                     dw1=opt.dw1, dw2=opt.dw2,
+                                                     drop_min=opt.drop_min, drop_max=opt.drop_max)
             RenderDict[f"image_gs{i}"] = RenderDict[f"render_pkg_gs{i}"]["render"]
             RenderDict[f"depth_gs{i}"] = RenderDict[f"render_pkg_gs{i}"]["depth"]
             RenderDict[f"alpha_gs{i}"] = RenderDict[f"render_pkg_gs{i}"]["alpha"]
@@ -227,59 +274,46 @@ def training(dataset, opt, pipe, args, depth_model):
             else:
                 LossDict[f"loss_gs{i}"] = loss_photometric(RenderDict[f"image_gs{i}"], gt_image, opt=opt)
 
-        for i in range(args.gaussiansN):
-            LossDict[f"loss_gs{i}"] += args.ranking_reg * ranking_loss(image, gt_image, patch_size=16)
 
-        # # 频率可配置；没有 args.save_depth_every 就用默认
-        # save_every = getattr(args, 'save_depth_every', DEFAULT_SAVE_DEPTH_EVERY)
-        #
-        # for i in range(args.gaussiansN):
-        #     # 2D 深度（注意：先保持二维以便可视化）
-        #     rendered_depth_2d = RenderDict[f"depth_gs{i}"][0]  # torch [H,W] 或 [1,H,W]
-        #     da2_depth_2d = torch.tensor(viewpoint_cam.depth_image, device=rendered_depth_2d.device)
-        #
-        #     # —— 保存监督深度(DA-v2)与渲染深度：每隔 save_every 次，只保存一份（i==0）——
-        #     if (iteration % save_every == 0) and (i == 0):
-        #         scene_tag = get_scene_tag(args, viewpoint_cam)
-        #         image_tag = get_image_tag(viewpoint_cam)
-        #         outdir = os.path.join('outputs', 'depth_debug', scene_tag)
-        #
-        #         save_depth_image(da2_depth_2d, os.path.join(outdir, f'{image_tag}_DAv2_it{iteration:06d}.png'))
-        #         save_depth_image(rendered_depth_2d, os.path.join(outdir, f'{image_tag}_REND_it{iteration:06d}.png'))
-        #
-        #     # —— 用于 loss：再展平为 [H*W,1] ——
-        #     rd = rendered_depth_2d.reshape(-1, 1)
-        #     md = da2_depth_2d.reshape(-1, 1)
-        #
-        #     # 用 torch.minimum，而不是 Python 的 min（避免 autograd 问题）
-        #     depth_loss = torch.minimum(
-        #         1 - pearson_corrcoef(-md, rd),
-        #         1 - pearson_corrcoef(1.0 / (md + 200.0), rd)
-        #     )
-        #     LossDict[f"loss_gs{i}"] += args.depth_weight * depth_loss
 
         for i in range(args.gaussiansN):
+            
             rendered_depth = RenderDict[f"depth_gs{i}"][0]
             midas_depth = torch.tensor(viewpoint_cam.depth_image).cuda()
 
             rendered_depth = rendered_depth.reshape(-1, 1)
             midas_depth = midas_depth.reshape(-1, 1)
 
-            depth_loss = min(
-                1 - pearson_corrcoef(-midas_depth, rendered_depth),
-                1 - pearson_corrcoef(1 / (midas_depth + 200.), rendered_depth)
-            )
+            r1 = 1.0 - safe_pearson(-midas_depth, rendered_depth)
+            r2 = 1.0 - safe_pearson(1.0 / (midas_depth + 200.0), rendered_depth)
+            depth_loss = torch.minimum(r1, r2)
             LossDict[f"loss_gs{i}"] += args.depth_weight * depth_loss
 
+
+
         for i in range(args.gaussiansN):
+            alpha_img = RenderDict[f"alpha_gs{i}"]
+                    
             alpha_loss, softalpha_loss = 0.0, 0.0
-            alpha_map = RenderDict[f"alpha_gs{i}"]
             if viewpoint_cam.gt_alpha_mask is not None:
-                alpha_loss = torch.mean(torch.abs(alpha_map) * (1 - viewpoint_cam.gt_alpha_mask))
+                alpha_loss = torch.mean(torch.abs(alpha_img) * (1 - viewpoint_cam.gt_alpha_mask))
             elif bg_mask is not None:
-                alpha_loss = torch.mean(torch.abs(alpha_map) * bg_mask)
-            softalpha_loss = args.opacity_reg * torch.abs(gaussians.get_opacity).mean()
+                alpha_loss = torch.mean(torch.abs(alpha_img) * bg_mask)
+            softalpha_loss = args.opacity_reg * torch.abs(GsDict[f"gs{i}"].get_opacity).mean()
             LossDict[f"loss_gs{i}"] += alpha_loss + softalpha_loss
+
+        far_loss = 0.0
+        if far_mask is not None and opt.lambda_far > 0:
+            # 单场：只 gs0
+            if args.gaussiansN == 1:
+                far_loss0 = masked_l1(RenderDict["image_gs0"], gt_image, far_mask)
+                LossDict["loss_gs0"] = LossDict["loss_gs0"] + opt.lambda_far * far_loss0
+            else:
+                # 双场：可各自加，也可取平均；这里各自加更直观
+                far_loss0 = masked_l1(RenderDict["image_gs0"], gt_image, far_mask)
+                far_loss1 = masked_l1(RenderDict["image_gs1"], gt_image, far_mask)
+                LossDict["loss_gs0"] = LossDict["loss_gs0"] + opt.lambda_far * far_loss0
+                LossDict["loss_gs1"] = LossDict["loss_gs1"] + opt.lambda_far * far_loss1
 
         if not args.onlyrgb:
             if iteration % args.sample_pseudo_interval == 0 and iteration <= args.end_sample_pseudo:
@@ -293,6 +327,7 @@ def training(dataset, opt, pipe, args, depth_model):
                     RenderDict[f"image_pseudo_co_gs{i}"] = RenderDict[f"render_pkg_pseudo_co_gs{i}"]["render"]
                     RenderDict[f"depth_pseudo_co_gs{i}"] = RenderDict[f"render_pkg_pseudo_co_gs{i}"]["depth"]
                 if iteration >= args.start_sample_pseudo:
+
                     ####################################################################
                     # co-reg
                     if args.coreg:
@@ -367,7 +402,7 @@ def training(dataset, opt, pipe, args, depth_model):
 
             if args.opacity_decay and iteration > opt.densify_from_iter:
                 opt.densify_until_iter = opt.iterations
-                gaussians.opacity_decay(factor=args.opacity_decay_factor)
+                GsDict[f"gs{i}"].opacity_decay(factor=args.opacity_decay_factor)
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -379,21 +414,6 @@ def training(dataset, opt, pipe, args, depth_model):
                     GsDict[f"gs{i}"].max_radii2D[visibility_filter] = torch.max(
                         GsDict[f"gs{i}"].max_radii2D[visibility_filter], radii[visibility_filter])
                     GsDict[f"gs{i}"].add_densification_stats(viewspace_point_tensor, visibility_filter)
-
-                    # ############step3 lpm points addition ############
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        lpm.points_addition(opt.densify_grad_threshold, size_threshold, viewpoint_cam,
-                                            current_view_index, sampled_index, image, gt_image, iteration)
-
-                    if iteration % opt.opacity_reset_interval == 0 or (
-                            dataset.white_background and iteration == opt.densify_from_iter):
-                        gaussians.reset_opacity()
-
-                # ############step4 lpm points reset/calibreation ############
-                if iteration > opt.reset_from_iter and iteration % opt.reset_interval == 0 and iteration < opt.reset_until_iter:
-                    lpm.points_calibration(opt.densify_grad_threshold, viewpoint_cam, current_view_index, sampled_index,
-                                           image, gt_image)
 
                 # density and prune
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
@@ -415,7 +435,7 @@ def training(dataset, opt, pipe, args, depth_model):
                 if (iteration - args.start_sample_pseudo - 1) % opt.opacity_reset_interval == 0 and \
                         iteration > args.start_sample_pseudo:
                     # if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    print(f"reset opacity of gaussians-{i} at iteration {iteration}")
+                    # print(f"reset opacity of gaussians-{i} at iteration {iteration}")
                     GsDict[f"gs{i}"].reset_opacity()
 
             if args.coprune and iteration > opt.densify_from_iter and iteration % 500 == 0:
@@ -487,7 +507,7 @@ def training_report(args, tb_writer, iteration, loss, l1_loss, testing_iteration
                 for i in range(args.gaussiansN):
                     if i != 0:
                         MetricDict[f"l1_test_gs{i}"], MetricDict[f"psnr_test_gs{i}"], MetricDict[f"ssim_test_gs{i}"], \
-                        MetricDict[f"lpips_test_gs{i}"] = 0.0, 0.0, 0.0, 0.0
+                            MetricDict[f"lpips_test_gs{i}"] = 0.0, 0.0, 0.0, 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     black = torch.zeros_like(gt_image).to(gt_image.device)
@@ -593,9 +613,10 @@ if __name__ == "__main__":
     parser.add_argument("--opacity_decay", action="store_true", default=True,
                         help="Enable opacity decay during training")
     parser.add_argument("--opacity_decay_factor", type=float, default=0.995, help="Opacity decay factor")
+    # parser.add_argument("--zdensify", action="store_true")
+    # parser.add_argument("--mask_param", type=int, default=10)
 
-    # parser.add_argument("--absdensify", action="store_true")
-
+    
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
