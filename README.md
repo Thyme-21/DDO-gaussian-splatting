@@ -1,4 +1,4 @@
-# GL-GS
+# DDO-GS
 This is the official repository for our paper "A Depth-Guided and Density-Adaptive Optimization Framework for Sparse-View 3D Gaussian Splatting"
 
 <img width="755" height="430" alt="image" src="https://github.com/user-attachments/assets/ea01da32-33c6-42bd-82b7-e365c4ac360b" />
